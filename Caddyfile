@@ -1,0 +1,5 @@
+# Replace with your own domain when hosting on a VPS
+# Example: api.yourdomain.com
+{$API_DOMAIN:localhost} {
+    reverse_proxy backend:8000
+}

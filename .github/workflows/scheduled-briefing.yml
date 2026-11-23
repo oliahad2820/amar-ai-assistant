@@ -1,0 +1,33 @@
+name: Scheduled Proactive Briefing (Optional Free Cron)
+
+on:
+  # Runs every 2 hours during Bangladesh office hours (09:00 - 21:00 BDT = 03:00 - 15:00 UTC)
+  schedule:
+    - cron: "0 3,5,7,9,11,13,15 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+      - name: Run email & Facebook sync briefing
+        working-directory: backend
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_PORT: ${{ secrets.IMAP_PORT }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASS: ${{ secrets.IMAP_PASS }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OWNER_NAME: ${{ vars.OWNER_NAME || 'অলি আহাদ' }}
+        run: python scripts/cron_sync.py

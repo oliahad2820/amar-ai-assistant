@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: amar-ai-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./backend/data:/app/data
+    ports:
+      - "8000:8000"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: amar-ai-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+web/dist/
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Environment & Secrets (NEVER commit!)
+.env
+.env.local
+backend/.env
+web/.env
+web/.env.local
+
+# Local Database & Runtime State
+*.db
+*.sqlite
+*.sqlite3
+backend/data/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

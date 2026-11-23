@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: amar-ai-assistant-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: TIMEZONE
+        value: Asia/Dhaka
+      - key: GEMINI_MODEL
+        value: gemini-4-hydrogen
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: IMAP_HOST
+        value: imap.gmail.com
+      - key: IMAP_USER
+        sync: false
+      - key: IMAP_PASS
+        sync: false
+      - key: FB_PAGE_ID
+        sync: false
+      - key: FB_PAGE_ACCESS_TOKEN
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"

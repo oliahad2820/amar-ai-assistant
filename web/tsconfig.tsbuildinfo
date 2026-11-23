@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/camerapresence.tsx","./src/components/emailpanel.tsx","./src/components/facebookpanel.tsx","./src/components/plannerpanel.tsx","./src/components/settingspanel.tsx","./src/lib/ai.ts","./src/lib/planner.ts","./src/lib/storage.ts","./src/lib/voice.ts"],"version":"5.9.3"}
