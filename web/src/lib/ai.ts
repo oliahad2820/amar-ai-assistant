@@ -46,6 +46,37 @@ function buildContextPrompt(
   ].join("\n");
 }
 
+async function callOllamaDirect(
+  settings: AssistantSettings,
+  prompt: string
+): Promise<string | null> {
+  const url = settings.ollamaUrl.trim();
+  if (!url) return null;
+  try {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(`${url.replace(/\/$/, "")}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: settings.ollamaModel || "qwen2.5:7b",
+        stream: false,
+        messages: [
+          { role: "system", content: buildSystemInstruction(settings) },
+          { role: "user", content: prompt },
+        ],
+      }),
+    });
+    window.clearTimeout(timeoutId);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.message?.content?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 async function callGeminiDirect(
   settings: AssistantSettings,
   prompt: string
@@ -61,21 +92,81 @@ async function callGeminiDirect(
     });
     return interaction.output_text?.trim() || null;
   } catch (err) {
-    console.warn("Direct Gemini API call failed, using smart fallback:", err);
+    console.warn("Direct Gemini API call failed, trying next free provider:", err);
     return null;
   }
+}
+
+async function callOpenAICompatDirect(
+  settings: AssistantSettings,
+  prompt: string
+): Promise<string | null> {
+  const url = settings.openaiCompatUrl.trim();
+  const key = settings.openaiCompatKey.trim();
+  if (!url || !key) return null;
+  try {
+    const res = await fetch(`${url.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model: settings.openaiCompatModel || "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: buildSystemInstruction(settings) },
+          { role: "user", content: prompt },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function callProviderChain(
+  settings: AssistantSettings,
+  prompt: string
+): Promise<{ text: string; source: "ollama" | "gemini" | "openai_compat" } | null> {
+  const mode = settings.aiProviderMode || "auto";
+  const order: Array<"ollama" | "gemini" | "openai_compat"> =
+    mode === "ollama"
+      ? ["ollama"]
+      : mode === "gemini"
+      ? ["gemini"]
+      : mode === "openai_compat"
+      ? ["openai_compat"]
+      : ["ollama", "gemini", "openai_compat"];
+
+  for (const provider of order) {
+    if (provider === "ollama") {
+      const text = await callOllamaDirect(settings, prompt);
+      if (text) return { text, source: "ollama" };
+    } else if (provider === "gemini") {
+      const text = await callGeminiDirect(settings, prompt);
+      if (text) return { text, source: "gemini" };
+    } else if (provider === "openai_compat") {
+      const text = await callOpenAICompatDirect(settings, prompt);
+      if (text) return { text, source: "openai_compat" };
+    }
+  }
+  return null;
 }
 
 export async function generateArrivalGreeting(
   settings: AssistantSettings,
   tasks: TaskItem[],
   emails: EmailItem[],
-  fbEvents: FacebookEventItem[]
+  fbEvents: FacebookEventItem[],
+  activeBackendUrl = ""
 ): Promise<string> {
-  // 1. Try Backend if connected
-  if (settings.backendUrl.trim()) {
+  const backend = (activeBackendUrl || settings.backendUrl || "").trim();
+  if (backend) {
     try {
-      const res = await fetch(`${settings.backendUrl.replace(/\/$/, "")}/api/presence/event`, {
+      const res = await fetch(`${backend.replace(/\/$/, "")}/api/presence/event`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -92,16 +183,15 @@ export async function generateArrivalGreeting(
         if (data.greeting_text) return data.greeting_text;
       }
     } catch {
-      // Fallback below
+      // Fall through cleanly
     }
   }
 
-  // 2. Try Direct Gemini API (Free Tier key in browser)
   const pending = tasks.filter((t) => t.status !== "done");
   const unreadEmails = emails.filter((e) => !e.is_read);
   const unreadFb = fbEvents.filter((f) => !f.is_read);
 
-  const geminiGreeting = await callGeminiDirect(
+  const aiResult = await callProviderChain(
     settings,
     `${settings.ownerName} এইমাত্র ক্যামেরার সামনে এসেছেন। ২-৩ বাক্যে আন্তরিক বাংলায় 'আসসালামু আলাইকুম' বলে স্বাগত জানাও এবং আজকের মূল অবস্থা সংক্ষেপে বলো:\n${buildContextPrompt(
       tasks,
@@ -109,9 +199,8 @@ export async function generateArrivalGreeting(
       fbEvents
     )}`
   );
-  if (geminiGreeting) return geminiGreeting;
+  if (aiResult) return aiResult.text;
 
-  // 3. Deterministic Smart Bengali Greeting
   const parts = [`আসসালামু আলাইকুম ${settings.ownerName}! আপনাকে আবার দেখে ভালো লাগলো।`];
   if (pending.length > 0) {
     parts.push(
@@ -133,12 +222,13 @@ export async function askAssistant(
   settings: AssistantSettings,
   tasks: TaskItem[],
   emails: EmailItem[],
-  fbEvents: FacebookEventItem[]
-): Promise<{ reply: string; source: "backend" | "gemini" | "local" }> {
-  // 1. Optional self-hosted/free backend
-  if (settings.backendUrl.trim()) {
+  fbEvents: FacebookEventItem[],
+  activeBackendUrl = ""
+): Promise<{ reply: string; source: "backend" | "ollama" | "gemini" | "openai_compat" | "local" }> {
+  const backend = (activeBackendUrl || settings.backendUrl || "").trim();
+  if (backend) {
     try {
-      const res = await fetch(`${settings.backendUrl.replace(/\/$/, "")}/api/chat`, {
+      const res = await fetch(`${backend.replace(/\/$/, "")}/api/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -155,8 +245,7 @@ export async function askAssistant(
     }
   }
 
-  // 2. Direct Gemini API
-  const geminiReply = await callGeminiDirect(
+  const aiResult = await callProviderChain(
     settings,
     `বর্তমান ড্যাশবোর্ড তথ্য:\n${buildContextPrompt(
       tasks,
@@ -164,9 +253,8 @@ export async function askAssistant(
       fbEvents
     )}\n\nব্যবহারকারীর প্রশ্ন: ${message}`
   );
-  if (geminiReply) return { reply: geminiReply, source: "gemini" };
+  if (aiResult) return { reply: aiResult.text, source: aiResult.source };
 
-  // 3. Smart Local Bengali Assistant
   const m = message.toLowerCase();
   const pending = tasks.filter((t) => t.status !== "done");
   const done = tasks.filter((t) => t.status === "done");
@@ -228,7 +316,7 @@ export async function askAssistant(
   }
 
   return {
-    reply: `আসসালামু আলাইকুম ${settings.ownerName}! আপনার ${pending.length}টি বাকি কাজ, ${unreadEmails.length}টি নতুন ইমেইল ও ${unreadFb.length}টি ফেসবুক আপডেট আমি ট্র্যাক করছি। জিজ্ঞেস করতে পারেন: "আজকের প্ল্যান বলো", "ইমেইল পড়ে শোনাও", বা "ফেসবুকে কে কমেন্ট করলো?" — আর পূর্ণ AI কথোপকথনের জন্য সেটিংসে ফ্রি Gemini API Key যোগ করুন।`,
+    reply: `আসসালামু আলাইকুম ${settings.ownerName}! আপনার ${pending.length}টি বাকি কাজ, ${unreadEmails.length}টি নতুন ইমেইল ও ${unreadFb.length}টি ফেসবুক আপডেট আমি ট্র্যাক করছি। আনলিমিটেড ফ্রি AI চালু করতে সেটিংস থেকে লোকাল Ollama অথবা ফ্রি Gemini/Groq API Key যুক্ত করুন।`,
     source: "local",
   };
 }
@@ -239,13 +327,13 @@ export async function analyzeEmailLocalOrAI(
   body: string,
   settings: AssistantSettings
 ): Promise<{ urgency: EmailUrgency; summary_bn: string; draft_reply: string }> {
-  const geminiText = await callGeminiDirect(
+  const aiResult = await callProviderChain(
     settings,
     `নিচের ইমেইলটি ১ বাক্যে বাংলায় সারাংশ করো এবং একটি ছোট ভদ্র রিপ্লাই ড্রাফট দাও। JSON ফরম্যাটে উত্তর দাও: {"urgency":"urgent|action_required|fyi","summary_bn":"...","draft_reply":"..."}\nপ্রেরক: ${sender}\nবিষয়: ${subject}\nবিবরণ: ${body.slice(0, 1200)}`
   );
-  if (geminiText) {
+  if (aiResult) {
     try {
-      const cleaned = geminiText.replace(/^```json\s*|\s*```$/g, "").trim();
+      const cleaned = aiResult.text.replace(/^```json\s*|\s*```$/g, "").trim();
       const parsed = JSON.parse(cleaned);
       if (parsed.summary_bn) {
         return {

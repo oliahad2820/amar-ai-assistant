@@ -48,6 +48,8 @@ export default function App() {
   const [fbEvents, setFbEvents] = useState<FacebookEventItem[]>(() => storage.loadFacebook());
   const [checkins, setCheckins] = useState<CheckinRecord[]>(() => storage.loadCheckins());
 
+  const [detectedLocalBackend, setDetectedLocalBackend] = useState<string>("");
+  const [lastVoiceEngine, setLastVoiceEngine] = useState<string>("");
   const [lastGreeting, setLastGreeting] = useState("");
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
@@ -62,18 +64,49 @@ export default function App() {
     {
       id: "welcome-1",
       role: "assistant",
-      text: `আসসালামু আলাইকুম ${storage.loadSettings().ownerName}! আমি আপনার ব্যক্তিগত এআই অ্যাসিস্ট্যান্ট। ক্যামেরা চালু করলে আমি আপনাকে দেখেই সালাম দেব, সারাদিনের অফিস কাজ সাজিয়ে দেব এবং একটু পর পর ফিডব্যাক দেব।`,
+      text: `আসসালামু আলাইকুম ${storage.loadSettings().ownerName}! আমি আপনার ব্যক্তিগত এআই অ্যাসিস্ট্যান্ট। ক্যামেরা চালু করলে আমি আপনাকে দেখেই সুন্দর বাংলা ফিমেল ভয়েসে সালাম দেব, সারাদিনের অফিস কাজ সাজিয়ে দেব এবং একটু পর পর ফিডব্যাক দেব।`,
       timestamp: new Date().toLocaleTimeString("bn-BD", { hour: "2-digit", minute: "2-digit" }),
     },
   ]);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
-  const backendConnected = Boolean(settings.backendUrl.trim());
+  const activeBackendUrl = (settings.backendUrl.trim() || detectedLocalBackend).trim();
+  const backendConnected = Boolean(activeBackendUrl);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
-    window.setTimeout(() => setToast(""), 3200);
+    window.setTimeout(() => setToast(""), 3500);
   }, []);
+
+  const speakNow = useCallback(
+    async (text: string) => {
+      const engine = await speakBengali(text, settings, activeBackendUrl);
+      setLastVoiceEngine(engine);
+      return engine;
+    },
+    [settings, activeBackendUrl]
+  );
+
+  // Auto-detect local backend (http://127.0.0.1:8000) for instant Neural Female Voice + Unlimited Ollama!
+  useEffect(() => {
+    if (settings.backendUrl.trim()) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 1800);
+    fetch("http://127.0.0.1:8000/api/health", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.status === "ok") {
+          setDetectedLocalBackend("http://127.0.0.1:8000");
+        }
+      })
+      .catch(() => {})
+      .finally(() => window.clearTimeout(timer));
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [settings.backendUrl]);
 
   // Persist local state
   useEffect(() => storage.saveSettings(settings), [settings]);
@@ -105,8 +138,8 @@ export default function App() {
 
   // Optional Backend initial fetch
   useEffect(() => {
-    if (!backendConnected) return;
-    const base = settings.backendUrl.replace(/\/$/, "");
+    if (!activeBackendUrl) return;
+    const base = activeBackendUrl.replace(/\/$/, "");
     fetch(`${base}/api/dashboard`, {
       headers: settings.backendToken
         ? { Authorization: `Bearer ${settings.backendToken}` }
@@ -122,7 +155,7 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }, [backendConnected, settings.backendUrl, settings.backendToken]);
+  }, [activeBackendUrl, settings.backendToken]);
 
   const latestCheckin = useMemo(
     () => checkins[0] || evaluateProgress(tasks),
@@ -134,18 +167,14 @@ export default function App() {
       const record = evaluateProgress(tasks);
       setCheckins((prev) => [record, ...prev.slice(0, 9)]);
       if (speak) {
-        speakBengali(
-          `${record.summary_bn} ${record.recommendation_bn}`,
-          settings.voiceEnabled,
-          settings.voiceRate
-        );
+        void speakNow(`${record.summary_bn} ${record.recommendation_bn}`);
       }
       showToast("প্রোঅ্যাক্টিভ প্রগ্রেস চেক-ইন সম্পন্ন হয়েছে।");
     },
-    [tasks, settings.voiceEnabled, settings.voiceRate, showToast]
+    [tasks, speakNow, showToast]
   );
 
-  // Periodic Proactive Feedback Timer ("একটু পর পর ফিডব্যাক দিবে")
+  // Periodic Proactive Feedback Timer
   useEffect(() => {
     const mins = Math.max(5, settings.checkinIntervalMinutes || 30);
     const timer = window.setInterval(() => {
@@ -156,9 +185,15 @@ export default function App() {
 
   const handleArrival = useCallback(
     async (_position: string) => {
-      const greeting = await generateArrivalGreeting(settings, tasks, emails, fbEvents);
+      const greeting = await generateArrivalGreeting(
+        settings,
+        tasks,
+        emails,
+        fbEvents,
+        activeBackendUrl
+      );
       setLastGreeting(greeting);
-      speakBengali(greeting, settings.voiceEnabled, settings.voiceRate);
+      void speakNow(greeting);
       setMessages((prev) => [
         ...prev,
         {
@@ -172,7 +207,7 @@ export default function App() {
         },
       ]);
     },
-    [settings, tasks, emails, fbEvents]
+    [settings, tasks, emails, fbEvents, activeBackendUrl, speakNow]
   );
 
   const sendChat = useCallback(
@@ -190,7 +225,14 @@ export default function App() {
       setChatInput("");
       setChatBusy(true);
       try {
-        const res = await askAssistant(clean, settings, tasks, emails, fbEvents);
+        const res = await askAssistant(
+          clean,
+          settings,
+          tasks,
+          emails,
+          fbEvents,
+          activeBackendUrl
+        );
         setMessages((prev) => [
           ...prev,
           {
@@ -203,12 +245,12 @@ export default function App() {
             }),
           },
         ]);
-        speakBengali(res.reply, settings.voiceEnabled, settings.voiceRate);
+        void speakNow(res.reply);
       } finally {
         setChatBusy(false);
       }
     },
-    [chatBusy, settings, tasks, emails, fbEvents]
+    [chatBusy, settings, tasks, emails, fbEvents, activeBackendUrl, speakNow]
   );
 
   const recognizerRef = useRef<ReturnType<typeof createBengaliRecognizer> | null>(null);
@@ -274,13 +316,13 @@ export default function App() {
       ? `প্ল্যান সাজানো হয়েছে! প্রথম কাজ "${first.title}" (${first.scheduled_start} থেকে ${first.scheduled_end})।`
       : "সব কাজ ইতিমধ্যে শেষ হয়ে গেছে!";
     showToast(msg);
-    speakBengali(msg, settings.voiceEnabled, settings.voiceRate);
+    void speakNow(msg);
   };
 
   const handleSpeakPlan = () => {
     const active = tasks.filter((t) => t.status !== "done");
     if (active.length === 0) {
-      speakBengali("আজকের সব অফিসের কাজ সম্পন্ন হয়ে গেছে।", settings.voiceEnabled, settings.voiceRate);
+      void speakNow("আজকের সব অফিসের কাজ সম্পন্ন হয়ে গেছে।");
       return;
     }
     const text =
@@ -289,13 +331,13 @@ export default function App() {
         .slice(0, 5)
         .map((t, i) => `${i + 1} নম্বর, ${t.title}, সময় ${t.scheduled_start || "নির্ধারিত নয়"}।`)
         .join(" ");
-    speakBengali(text, settings.voiceEnabled, settings.voiceRate);
+    void speakNow(text);
   };
 
   // ---------- EMAIL ACTIONS ----------
   const handleSyncEmails = async () => {
-    if (!backendConnected) return;
-    const base = settings.backendUrl.replace(/\/$/, "");
+    if (!activeBackendUrl) return;
+    const base = activeBackendUrl.replace(/\/$/, "");
     const res = await fetch(`${base}/api/emails/sync`, {
       method: "POST",
       headers: settings.backendToken
@@ -328,7 +370,6 @@ export default function App() {
     };
     setEmails((prev) => [newEmail, ...prev]);
 
-    // If this is a Facebook email notification, also surface it cleanly in Facebook Monitor!
     if (sender.toLowerCase().includes("facebook")) {
       setFbEvents((prev) => [
         {
@@ -362,8 +403,8 @@ export default function App() {
   };
 
   const handleSendApprovedReply = async (em: EmailItem, replyBody: string) => {
-    if (!backendConnected) return;
-    const base = settings.backendUrl.replace(/\/$/, "");
+    if (!activeBackendUrl) return;
+    const base = activeBackendUrl.replace(/\/$/, "");
     const emailAddrMatch = em.sender.match(/<([^>]+)>/);
     const toAddr = emailAddrMatch ? emailAddrMatch[1] : em.sender;
     const res = await fetch(`${base}/api/emails/${em.id}/send-reply`, {
@@ -383,8 +424,8 @@ export default function App() {
 
   // ---------- FACEBOOK ACTIONS ----------
   const handleSyncFacebook = async () => {
-    if (!backendConnected) return;
-    const base = settings.backendUrl.replace(/\/$/, "");
+    if (!activeBackendUrl) return;
+    const base = activeBackendUrl.replace(/\/$/, "");
     const res = await fetch(`${base}/api/facebook/sync`, {
       method: "POST",
       headers: settings.backendToken
@@ -426,7 +467,7 @@ export default function App() {
     const unread = fbEvents.filter((f) => !f.is_read);
     const list = unread.length > 0 ? unread : fbEvents.slice(0, 3);
     if (list.length === 0) {
-      speakBengali("ফেসবুকে কোনো নতুন লাইক বা কমেন্ট নেই।", settings.voiceEnabled, settings.voiceRate);
+      void speakNow("ফেসবুকে কোনো নতুন লাইক বা কমেন্ট নেই।");
       return;
     }
     const msg =
@@ -435,7 +476,7 @@ export default function App() {
         .slice(0, 3)
         .map((f) => `${f.actor_name} লিখেছেন বা রিঅ্যাক্ট করেছেন: ${f.content}।`)
         .join(" ");
-    speakBengali(msg, settings.voiceEnabled, settings.voiceRate);
+    void speakNow(msg);
   };
 
   const handleExportBackup = () => {
@@ -512,21 +553,39 @@ export default function App() {
               <Bot className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-sm sm:text-base font-bold text-white leading-none">
                   {settings.assistantName}
                 </h1>
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
-                  {backendConnected ? "লাইভ ব্যাকএন্ড" : settings.geminiApiKey ? "Gemini AI" : "ফ্রি লোকাল মোড"}
+                  {backendConnected
+                    ? "নিউরাল ফিমেল ভয়েস (নবনীতা) • চালু"
+                    : settings.geminiApiKey
+                    ? "Gemini 3.8 ভয়েস + AI"
+                    : "ফ্রি লোকাল মোড"}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5">
                 {settings.ownerName} • {clockText}
+                {lastVoiceEngine === "neural_backend" ? " • স্টুডিও বাংলা ভয়েস" : ""}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                void speakNow(
+                  `আসসালামু আলাইকুম ${settings.ownerName}! আমি আপনার ${settings.assistantName}, নতুন সুন্দর বাংলা ভয়েসে কথা বলছি।`
+                )
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-sky-500/15 text-sky-300 border border-sky-500/30 hover:bg-sky-500/25 cursor-pointer transition"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              ভয়েস টেস্ট
+            </button>
+
             <button
               type="button"
               onClick={() => {
@@ -563,7 +622,7 @@ export default function App() {
             { id: "planner", label: "অফিস প্ল্যানার", icon: CalendarClock, count: pendingCount },
             { id: "emails", label: "ইমেইল", icon: Mail, count: unreadEmailCount },
             { id: "facebook", label: "ফেসবুক", icon: MessageSquareHeart, count: unreadFbCount },
-            { id: "settings", label: "সেটিংস ও ডোমেইন", icon: Settings, count: 0 },
+            { id: "settings", label: "সেটিংস ও ভয়েস", icon: Settings, count: 0 },
           ].map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
@@ -656,7 +715,6 @@ export default function App() {
         {/* DASHBOARD TAB */}
         {tab === "dashboard" && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-            {/* Left Column: Camera + Proactive Progress Feedback */}
             <div className="lg:col-span-6 space-y-4">
               <CameraPresence
                 ownerName={settings.ownerName}
@@ -670,7 +728,6 @@ export default function App() {
                 lastGreeting={lastGreeting}
               />
 
-              {/* Proactive Progress Check-in Card */}
               <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -702,7 +759,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Progress Bar */}
                 <div className="space-y-1">
                   <div className="flex justify-between text-xs text-slate-400">
                     <span>আজকের অগ্রগতি</span>
@@ -723,7 +779,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right Column: Live Bengali Voice & AI Chat */}
             <div className="lg:col-span-6 rounded-2xl bg-slate-900/90 border border-slate-800 p-4 flex flex-col h-[560px]">
               <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                 <div className="flex items-center gap-2">
@@ -744,7 +799,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Quick Prompts */}
               <div className="flex flex-wrap gap-1.5 py-2.5 border-b border-slate-800/70">
                 {[
                   "আজ আমার কী কী কাজ আছে?",
@@ -763,7 +817,6 @@ export default function App() {
                 ))}
               </div>
 
-              {/* Chat Feed */}
               <div className="flex-1 overflow-y-auto py-3 space-y-3 pr-1">
                 {messages.map((m) => (
                   <div
@@ -794,7 +847,6 @@ export default function App() {
                 <div ref={chatEndRef} />
               </div>
 
-              {/* Input */}
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -840,10 +892,8 @@ export default function App() {
             onIngestManual={handleManualEmail}
             onExtractTask={handleExtractTaskFromEmail}
             onSpeakEmail={(em) =>
-              speakBengali(
-                `${em.sender} থেকে ইমেইল এসেছে। বিষয়: ${em.subject}। সারাংশ: ${em.summary_bn}`,
-                settings.voiceEnabled,
-                settings.voiceRate
+              void speakNow(
+                `${em.sender} থেকে ইমেইল এসেছে। বিষয়: ${em.subject}। সারাংশ: ${em.summary_bn}`
               )
             }
             onMarkRead={(id) =>
@@ -869,6 +919,7 @@ export default function App() {
         {tab === "settings" && (
           <SettingsPanel
             settings={settings}
+            activeBackendUrl={activeBackendUrl}
             onSave={(next) => {
               setSettings(next);
               showToast("সেটিংস সেভ করা হয়েছে!");

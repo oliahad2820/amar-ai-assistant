@@ -16,6 +16,12 @@ def test_health_and_dashboard(tmp_path):
     res = client.get("/api/health")
     assert res.status_code == 200
     assert res.json()["status"] == "ok"
+    assert res.headers.get("access-control-allow-private-network") == "true"
+    assert "provider_order" in res.json()
+
+    voices = client.get("/api/tts/voices")
+    assert voices.status_code == 200
+    assert any(v["id"] == "bn-BD-NabanitaNeural" for v in voices.json())
 
     dash = client.get("/api/dashboard")
     assert dash.status_code == 200

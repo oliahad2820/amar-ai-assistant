@@ -4,7 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -15,6 +15,7 @@ from .database import Database
 from .email_service import fetch_imap_emails, parse_facebook_notification_email, send_approved_email
 from .facebook_service import fetch_page_activity, parse_webhook_payload, verify_webhook_signature
 from .planner_service import build_daily_plan, evaluate_checkin
+from .tts_service import list_voices, synthesize_speech
 
 db = Database()
 
@@ -79,6 +80,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_private_network_header(request: Request, call_next):
+    """Allows HTTPS GitHub Pages / custom domain to reach local loopback backend cleanly."""
+    if request.method == "OPTIONS":
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
 
 
 def require_auth(authorization: str | None = Header(default=None)) -> None:
@@ -147,6 +160,12 @@ class ChatRequest(BaseModel):
     previous_interaction_id: str | None = None
 
 
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1500)
+    voice: str = "bn-BD-NabanitaNeural"
+    rate: float = Field(default=1.0, ge=0.7, le=1.4)
+
+
 # ---------- ROUTES ----------
 @app.get("/api/health")
 def health() -> dict[str, Any]:
@@ -154,7 +173,11 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "assistant": settings.assistant_name,
         "owner": settings.owner_name,
+        "provider_order": settings.provider_order_list,
+        "ollama_reachable": ai_service.is_ollama_reachable(),
+        "ollama_model": settings.ollama_model,
         "gemini_configured": bool(settings.gemini_api_key),
+        "openai_compat_configured": bool(settings.openai_compat_api_key),
         "imap_configured": bool(settings.imap_user and settings.imap_pass),
         "facebook_page_configured": bool(settings.fb_page_id and settings.fb_page_access_token),
     }
@@ -393,6 +416,24 @@ def chat(payload: ChatRequest) -> dict[str, Any]:
         fb_events=db.list_facebook_events(),
         previous_interaction_id=payload.previous_interaction_id,
     )
+
+
+@app.get("/api/tts/voices")
+def get_tts_voices() -> list[dict[str, Any]]:
+    return list_voices()
+
+
+@app.post("/api/tts", dependencies=[Depends(require_auth)])
+async def text_to_speech(payload: TTSRequest) -> Response:
+    try:
+        audio_bytes, media_type = await synthesize_speech(
+            payload.text, voice=payload.voice, rate=payload.rate
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"নিউরাল ভয়েস তৈরি ব্যর্থ: {exc}") from exc
+    return Response(content=audio_bytes, media_type=media_type)
 
 
 @app.websocket("/ws/live")

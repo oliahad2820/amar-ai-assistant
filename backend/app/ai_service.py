@@ -4,6 +4,8 @@ import json
 import logging
 from typing import Any
 
+import httpx
+
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,7 +25,7 @@ class AIService:
         self.model = model or settings.gemini_model
         self._client = None
 
-    def _get_client(self):
+    def _get_gemini_client(self):
         if not self.api_key:
             return None
         if self._client is None:
@@ -36,13 +38,50 @@ class AIService:
                 return None
         return self._client
 
+    def is_ollama_reachable(self) -> bool:
+        if not settings.ollama_base_url:
+            return False
+        try:
+            resp = httpx.get(
+                f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=1.2
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def _ask_ollama(self, prompt: str, expect_json: bool = False) -> str | None:
+        if not settings.ollama_base_url:
+            return None
+        try:
+            payload: dict[str, Any] = {
+                "model": settings.ollama_model,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_INSTRUCTION_BN},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            if expect_json:
+                payload["format"] = "json"
+            resp = httpx.post(
+                f"{settings.ollama_base_url.rstrip('/')}/api/chat",
+                json=payload,
+                timeout=25.0,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            return (data.get("message") or {}).get("content", "").strip() or None
+        except Exception:
+            return None
+
     def _ask_gemini(
         self,
         prompt: str,
         previous_interaction_id: str | None = None,
         json_schema: dict[str, Any] | None = None,
     ) -> tuple[str | None, str | None]:
-        client = self._get_client()
+        client = self._get_gemini_client()
         if not client:
             return None, None
         try:
@@ -62,8 +101,62 @@ class AIService:
             interaction = client.interactions.create(**kwargs)
             return interaction.output_text, getattr(interaction, "id", None)
         except Exception as exc:  # pragma: no cover
-            logger.warning("Gemini API call failed, falling back cleanly: %s", exc)
+            logger.warning("Gemini API call failed, trying next provider: %s", exc)
             return None, None
+
+    def _ask_openai_compat(self, prompt: str) -> str | None:
+        if not settings.openai_compat_api_key or not settings.openai_compat_base_url:
+            return None
+        try:
+            resp = httpx.post(
+                f"{settings.openai_compat_base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openai_compat_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.openai_compat_model,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_INSTRUCTION_BN},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=20.0,
+            )
+            if resp.status_code != 200:
+                return None
+            choices = resp.json().get("choices") or []
+            if not choices:
+                return None
+            return (choices[0].get("message") or {}).get("content", "").strip() or None
+        except Exception:
+            return None
+
+    def _ask_with_fallback(
+        self,
+        prompt: str,
+        previous_interaction_id: str | None = None,
+        json_schema: dict[str, Any] | None = None,
+    ) -> tuple[str | None, str | None, str]:
+        """Tries configured free providers in order: Ollama (unlimited) -> Gemini -> OpenAI-compat."""
+        for provider in settings.provider_order_list:
+            if provider == "ollama":
+                text = self._ask_ollama(prompt, expect_json=bool(json_schema))
+                if text:
+                    return text, None, "ollama"
+            elif provider == "gemini":
+                text, iid = self._ask_gemini(
+                    prompt,
+                    previous_interaction_id=previous_interaction_id,
+                    json_schema=json_schema,
+                )
+                if text:
+                    return text, iid, "gemini"
+            elif provider == "openai_compat":
+                text = self._ask_openai_compat(prompt)
+                if text:
+                    return text, None, "openai_compat"
+        return None, None, "local"
 
     def generate_greeting(
         self,
@@ -82,7 +175,7 @@ class AIService:
             f"বাকি কাজ {len(pending)}টি (সবচেয়ে জরুরি: {pending[0]['title'] if pending else 'কিছু নেই'}), "
             f"নতুন ইমেইল {len(unread_emails)}টি, নতুন ফেসবুক নোটিফিকেশন {len(unread_fb)}টি।"
         )
-        text, _ = self._ask_gemini(prompt)
+        text, _, _ = self._ask_with_fallback(prompt)
         if text:
             return text.strip()
 
@@ -116,14 +209,15 @@ class AIService:
             "required": ["urgency", "summary_bn", "draft_reply"],
         }
         prompt = (
-            "নিচের ইমেইলটি বিশ্লেষণ করো। জরুরি মাত্রা (urgent/action_required/fyi), "
-            "১ বাক্যে বাংলা সারাংশ এবং একটি ভদ্র ড্রাফট রিপ্লাই দাও।\n"
+            "নিচের ইমেইলটি বিশ্লেষণ করো এবং JSON ফরম্যাটে উত্তর দাও: "
+            '{"urgency":"urgent|action_required|fyi","summary_bn":"১ বাক্যে বাংলা সারাংশ","draft_reply":"ভদ্র রিপ্লাই ড্রাফট"}\n'
             f"প্রেরক: {sender}\nবিষয়: {subject}\nবিবরণ: {body[:1500]}"
         )
-        raw, _ = self._ask_gemini(prompt, json_schema=schema)
+        raw, _, _ = self._ask_with_fallback(prompt, json_schema=schema)
         if raw:
             try:
-                parsed = json.loads(raw)
+                cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
+                parsed = json.loads(cleaned)
                 return {
                     "urgency": parsed.get("urgency", "fyi"),
                     "summary_bn": parsed.get("summary_bn", subject),
@@ -154,7 +248,7 @@ class AIService:
             f"ফেসবুকে {actor_name} একটি {event_type} করেছে: '{content[:300]}'।"
             "এর জন্য ১-২ বাক্যে আন্তরিক বাংলা রিপ্লাই ড্রাফট লেখো।"
         )
-        text, _ = self._ask_gemini(prompt)
+        text, _, _ = self._ask_with_fallback(prompt)
         if text:
             return text.strip()
         if event_type == "like":
@@ -183,7 +277,7 @@ class AIService:
             + (", ".join(f"{f['actor_name']} ({f['event_type']}): {f['content'][:60]}" for f in unread_fb[:5]) or "নেই")
         )
 
-        text, interaction_id = self._ask_gemini(
+        text, interaction_id, provider = self._ask_with_fallback(
             f"{context_summary}\n\nব্যবহারকারীর কথা: {message}",
             previous_interaction_id=previous_interaction_id,
         )
@@ -191,10 +285,10 @@ class AIService:
             return {
                 "reply": text.strip(),
                 "interaction_id": interaction_id,
-                "used_gemini": True,
+                "provider": provider,
+                "used_gemini": provider == "gemini",
             }
 
-        # Smart local Bengali fallback when GEMINI_API_KEY is not configured yet
         m = message.lower()
         if any(w in m for w in ("ইমেইল", "email", "mail", "মেইল")):
             if not emails:
@@ -224,12 +318,16 @@ class AIService:
         else:
             reply = (
                 f"আসসালামু আলাইকুম! আমি আপনার {len(pending)}টি বাকি কাজ, {len(unread_emails)}টি নতুন ইমেইল "
-                f"এবং {len(unread_fb)}টি ফেসবুক আপডেট নজরে রাখছি। আমাকে জিজ্ঞেস করতে পারেন: "
-                "'আজকের কাজগুলো কী?', 'ইমেইল পড়ে শোনাও', অথবা 'ফেসবুকে কে কমেন্ট করলো?' "
-                "(পূর্ণ AI কথোপকথনের জন্য সেটিংসে ফ্রি Gemini API Key দিন।)"
+                f"এবং {len(unread_fb)}টি ফেসবুক আপডেট নজরে রাখছি। আনলিমিটেড ফ্রি AI চালু করতে আপনার ম্যাক/পিসিতে "
+                "Ollama ইনস্টল করুন অথবা সেটিংসে ফ্রি Gemini/Groq API Key যোগ করুন।"
             )
 
-        return {"reply": reply, "interaction_id": None, "used_gemini": False}
+        return {
+            "reply": reply,
+            "interaction_id": None,
+            "provider": "local",
+            "used_gemini": False,
+        }
 
 
 ai_service = AIService()

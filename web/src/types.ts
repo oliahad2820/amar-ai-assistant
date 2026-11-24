@@ -2,6 +2,8 @@ export type Priority = "urgent" | "high" | "normal" | "low";
 export type TaskStatus = "pending" | "in_progress" | "done";
 export type EmailUrgency = "urgent" | "action_required" | "fyi";
 export type FacebookEventType = "comment" | "like" | "mention" | "message" | "notification";
+export type AIProviderMode = "auto" | "ollama" | "gemini" | "openai_compat";
+export type TTSEngineMode = "auto" | "neural_backend" | "gemini_tts" | "browser";
 
 export interface TaskItem {
   id: number;
@@ -66,12 +68,25 @@ export interface AssistantSettings {
   ownerName: string;
   assistantName: string;
   customDomain: string;
+
+  // Unlimited Free Multi-Provider AI
+  aiProviderMode: AIProviderMode;
+  ollamaUrl: string;
+  ollamaModel: string;
   geminiApiKey: string;
   geminiModel: string;
+  openaiCompatUrl: string;
+  openaiCompatKey: string;
+  openaiCompatModel: string;
+
+  // Backend & Neural Female Voice
   backendUrl: string;
   backendToken: string;
   voiceEnabled: boolean;
   voiceRate: number;
+  ttsEngine: TTSEngineMode;
+  ttsVoice: string;
+
   checkinIntervalMinutes: number;
   greetingCooldownMinutes: number;
   pinCode: string;
